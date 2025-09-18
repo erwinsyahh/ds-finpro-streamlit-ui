@@ -4,6 +4,12 @@ import numpy as np
 import joblib
 from sklearn.base import BaseEstimator, TransformerMixin
 from scipy.sparse import hstack
+import re
+import nltk
+from textblob import TextBlob
+from nltk.sentiment import SentimentIntensityAnalyzer
+from sentence_transformers import SentenceTransformer
+nltk.download("vader_lexicon", quiet=True)
 
 class DateTimeFeatures(BaseEstimator, TransformerMixin):
     def __init__(self, column="timestamp"):
@@ -69,18 +75,17 @@ class Preproccess(BaseEstimator, TransformerMixin):
         self.ohe_columns = joblib.load("artifacts/ohe_columns.joblib")
         self.dfc_columns = joblib.load("artifacts/dfc_columns.joblib")
         self.scaler = joblib.load("artifacts/scaler.joblib")
+        self.pred_columns = joblib.load("artifacts/pred_columns.joblib")
 
         # Create separate cleaners for each type
         self.cleaner_text = TextCleaner(mode="text")
-        self.cleaner_mentions = TextCleaner(mode="mentions")
-        self.cleaner_hashtags = TextCleaner(mode="hashtags")
+        # self.cleaner_mentions = TextCleaner(mode="mentions")
+        # self.cleaner_hashtags = TextCleaner(mode="hashtags")
 
         self.text_columns = ["text_content", "mentions", "hashtags"]
-        self.ordinal_columns = ["day_of_week", "sentiment_label", "emotion_type", "campaign_phase"]
+        self.ordinal_columns = ["day_of_week", "campaign_phase"]
         self.ordinal_categories = [
             ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
-            ["Negative", "Neutral", "Positive"],
-            ["Confused", "Angry", "Sad", "Happy", "Excited"],
             ["Pre-Launch", "Launch", "Post-Launch"],
         ]
 
@@ -90,7 +95,7 @@ class Preproccess(BaseEstimator, TransformerMixin):
         #     "user_past_sentiment_avg", "user_engagement_growth", "buzz_change_rate"
         # ]
 
-        self.decimal_cols = ['day_of_week', 'sentiment_label', 'emotion_type', 'likes_count',
+        self.decimal_cols = ['day_of_week', 'likes_count',
             'shares_count', 'comments_count', 'impressions', 'campaign_phase',
             'year', 'month', 'day', 'hour']
 
@@ -99,16 +104,16 @@ class Preproccess(BaseEstimator, TransformerMixin):
             "brand_name", "product_name", "campaign_name"
         ]
 
-        self.drop_columns = ["user_id", "post_id", "keywords"]
+        self.drop_columns = ["user_id", "post_id", "keywords", 'sentiment_label', 'emotion_type', 'toxicity_score', 'likes_count', 'shares_count', 'comments_count', 'impressions']
 
     def fit(self, X, y=None):
         return self
     
     def tfidf_transform(self, X):
          # Clean per column with the right cleaner
-        X["text_content"] = self.cleaner_text.transform(X["text_content"])
-        X["mentions"] = self.cleaner_mentions.transform(X["mentions"])
-        X["hashtags"] = self.cleaner_hashtags.transform(X["hashtags"])
+        # X["text_content"] = self.cleaner_text.transform(X["text_content"])
+        # X["mentions"] = self.cleaner_mentions.transform(X["mentions"])
+        # X["hashtags"] = self.cleaner_hashtags.transform(X["hashtags"])
 
         # Transform with pre-trained TF-IDF vectorizers
         tfidf_text_result = self.tfidf_text.transform(X["text_content"])
@@ -139,11 +144,12 @@ class Preproccess(BaseEstimator, TransformerMixin):
 
     def ohe_transform(self, X):
 
+        ohe_columns = ['platform', 'location', 'language', 'topic_category', 'brand_name', 'product_name', 'campaign_name']
         # One-hot encode new data
-        df_ohe = pd.get_dummies(self.df, columns=self.categorical_columns)
+        df_ohe = pd.get_dummies(self.df, columns=ohe_columns)
 
-        inputed_ohe = pd.get_dummies(X, columns=self.categorical_columns)
-        
+        inputed_ohe = pd.get_dummies(X, columns=ohe_columns)
+
         # Reindex to match training
         df_inputed_ohe = inputed_ohe.reindex(columns=df_ohe.columns, fill_value=False)
 
@@ -160,31 +166,77 @@ class Preproccess(BaseEstimator, TransformerMixin):
         X = X.drop(["timestamp"], axis=1)
 
         return X
+    def analyze_sentiment(self, X):
+        sia = SentimentIntensityAnalyzer()
 
+        df_vader = X.copy()
+        # remove hashtags but keep the word itself
+        df_vader["text_content"] = df_vader["text_content"].apply(lambda x: re.sub(r'#\w+', '', x))
 
+        X["vader_neg"] = df_vader["text_content"].apply(lambda x: sia.polarity_scores(x)["neg"])
+        X["vader_neu"] = df_vader["text_content"].apply(lambda x: sia.polarity_scores(x)["neu"])
+        X["vader_pos"] = df_vader["text_content"].apply(lambda x: sia.polarity_scores(x)["pos"])
+        X["vader_compound"] = df_vader["text_content"].apply(lambda x: sia.polarity_scores(x)["compound"])
+        
+        return X
+    
+    def sentence_transformer(self, X):
+        model = SentenceTransformer("all-MiniLM-L6-v2")
+
+        X_text = X.copy()
+
+        X_text["text_content"] = self.cleaner_text.transform(X_text["text_content"])
+        print(X_text["text_content"][0])
+
+        X_embeddings = model.encode(
+            X_text["text_content"].tolist(),        
+            show_progress_bar=True,  
+        )
+
+        emb_df = pd.DataFrame(X_embeddings, columns=[f"emb_{i}" for i in range(X_embeddings.shape[1])])
+        X = pd.concat([X.reset_index(drop=True), emb_df], axis=1)
+
+        return X
+    
+
+    def textblob_polarity(self, X):
+        X_text = X.copy()
+
+        print(X_text["text_content"].dtype)
+
+        # remove hashtags
+        X_text["text_content"] = X_text["text_content"].apply(lambda x: re.sub(r'#\w+', '', str(x)))
+
+        # polarity score
+        X["textblob_polarity"] = X_text["text_content"].apply(lambda x: TextBlob(x).sentiment.polarity)
+
+        return X
 
     def transform(self, X):
         X = X.copy()
 
-        df_tfidf = self.tfidf_transform(X)
+        # df_tfidf = self.tfidf_transform(X)
         X = self.oe_transform(X)
         df_ohe = self.ohe_transform(X)
         
+        X = self.analyze_sentiment(X)
+        X = self.sentence_transformer(X)
+        X = self.textblob_polarity(X)
         # # X.drop(self.ordinal_columns, axis=1)
-        X = X.drop(self.categorical_columns, axis=1)
-
-        X = pd.merge(X, df_tfidf, left_index=True, right_index=True)
-        # X = pd.concat([X, df_oe])
-        X = pd.merge(X, df_ohe)
         X = self.date_transform(X)
+        X = X.drop(self.categorical_columns, axis=1)
         X = X.drop(self.text_columns, axis=1)
         X = X.drop(self.drop_columns, axis=1)
-        X[self.decimal_cols] = X[self.decimal_cols].astype(int)
-        X["sentiment_score"] = X["sentiment_score"].astype(float)
+        X = pd.merge(X, df_ohe)
+
+        df_vader_columns = ["vader_neg", "vader_neu", "vader_pos", "vader_compound"]
+        emb_cols = [col for col in self.dfc_columns if col.startswith("emb_")]
+        non_emb_cols = [c for c in self.dfc_columns if c not in ["sentiment_score"] and c not in self.drop_columns and c not in ["textblob_polarity"] and c not in df_vader_columns and c not in emb_cols ]
 
         X = X[self.dfc_columns]
-        X = self.scaler.transform(X)
-        X = pd.DataFrame(X, columns=self.dfc_columns)
+        X[non_emb_cols] = self.scaler.transform(X[non_emb_cols])
+        X = X[self.pred_columns]
+        # X = X.drop(["sentiment_score"], axis=1)
+        # X = pd.DataFrame(X, columns=self.dfc_columns)
 
-        X = X.drop(["sentiment_score"], axis=1)
         return X

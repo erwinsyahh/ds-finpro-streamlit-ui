@@ -11,7 +11,7 @@ st.title("🔮 Sentiment Prediction Interface")
 ARTIFACT_DIR = "artifacts"
 os.makedirs(ARTIFACT_DIR, exist_ok=True)
 
-with open(os.path.join(ARTIFACT_DIR, "model.pkl"), "rb") as f:
+with open(os.path.join(ARTIFACT_DIR, "finalized_model.pkl"), "rb") as f:
     ridge_model = pickle.load(f)
 
 # Target variable
@@ -72,6 +72,8 @@ if st.button("Predict Single Record"):
         preprocessor = Preproccess()
 
         X_transform = preprocessor.transform(X_new)
+
+        st.dataframe(X_transform)
 
         pred = ridge_model.predict(X_transform)[0]
         st.success(f"Predicted {target}: {pred:.6f}")
